@@ -1,0 +1,43 @@
+---
+- name: Replace SSL certificates on ESXi hosts
+  hosts: esxi_hosts
+  gather_facts: no
+  vars:
+    cert_source_dir: /path/to/certificates  # Update this path
+    cert_dest_dir: /etc/vmware/ssl
+  tasks:
+    - name: Ensure destination directory exists
+      ansible.builtin.file:
+        path: "{{ cert_dest_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Backup existing SSL certificates
+      ansible.builtin.command: >
+        mv {{ cert_dest_dir }}/rui.crt {{ cert_dest_dir }}/rui.crt.bak &&
+        mv {{ cert_dest_dir }}/rui.key {{ cert_dest_dir }}/rui.key.bak
+      args:
+        warn: false
+      ignore_errors: yes
+
+    - name: Copy new SSL certificate
+      ansible.builtin.copy:
+        src: "{{ cert_source_dir }}/{{ inventory_hostname }}.crt"
+        dest: "{{ cert_dest_dir }}/rui.crt"
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Copy new SSL key
+      ansible.builtin.copy:
+        src: "{{ cert_source_dir }}/{{ inventory_hostname }}.key"
+        dest: "{{ cert_dest_dir }}/rui.key"
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Restart ESXi services to apply new certificates
+      ansible.builtin.shell: |
+        /etc/init.d/hostd restart
+        /etc/init.d/vpxa restart
+      ignore_errors: yes
