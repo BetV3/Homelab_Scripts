@@ -3,7 +3,6 @@
   hosts: esxi_hosts
   gather_facts: no
   vars:
-    cert_source_dir: /path/to/certificates  # Update this path
     cert_dest_dir: /etc/vmware/ssl
   tasks:
     - name: Ensure destination directory exists
@@ -16,8 +15,6 @@
       ansible.builtin.command: >
         mv {{ cert_dest_dir }}/rui.crt {{ cert_dest_dir }}/rui.crt.bak &&
         mv {{ cert_dest_dir }}/rui.key {{ cert_dest_dir }}/rui.key.bak
-      args:
-        warn: false
       ignore_errors: yes
 
     - name: Copy new SSL certificate
