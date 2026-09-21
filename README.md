@@ -61,3 +61,15 @@ same sample count across the outage window — zero loss.
   secrets from `0600` files on the host.
 - Scripts are intended to be read as much as run. They carry comments
   explaining the failure that motivated them.
+
+## vSphere automation
+
+`vsphere/` holds the scripts that manage the 7-host ESXi cluster through the
+vCenter API: provisioning with cloud-init via guestinfo, live fleet metrics,
+and hardware capability checks. Two findings in there are worth more than the
+code: Ubuntu cloud images have no EFI system partition (so EFI VMs never
+boot), and a missing AVX2 is physically missing on Sandy/Ivy Bridge rather
+than masked by EVC.
+
+The older `Ansible/` and `esxi_customks_iso.sh` predate this and cover
+bare-metal ESXi install and certificate replacement.
