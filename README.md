@@ -1,100 +1,63 @@
-# Homelab_Scripts
-A github repo that will host my scripts that I use in my homelab
-To replace the SSL certificate of a vCenter Server using the `/usr/lib/vmware-vmca/bin/certificate-manager` utility, follow these steps:
+# Homelab Scripts
 
----
-# Replacing vCenter 7 certificates
-### Prerequisites:
-1. **Certificate files**:
-   - The SSL certificate (`.crt` or `.pem`).
-   - The private key (`.key`).
-   - The Certificate Authority (CA) chain
+Operational scripts from a 7-host vSphere homelab running three RKE2
+Kubernetes clusters, a fleet watchdog, and a self-hosted observability stack.
 
-2. **SSH Access**:
-   - SSH into the vCenter Server Appliance (VCSA) as `root`.
+This repo exists because a portfolio full of numbers is not evidence. Every
+file here is the actual artifact behind a claim made elsewhere, with internal
+addressing replaced by placeholders. The logic is unmodified.
 
-3. **Backup**:
-   - Take a snapshot of the vCenter server or ensure you have a proper backup.
+## Monitoring
 
----
+| File | What it proves |
+|---|---|
+| `monitoring/watchdog_k8s_envs.py` | 16 signals across staging and production: API reachability through the VIP, node readiness, etcd quorum, CNI, VIP holder, ingress, real pod scheduling, backup freshness. Scheduling is verified by running a pod and reading its output, not by reading a status field. |
+| `monitoring/watchdog_edge.py` | 4 signals for a Cloudflare-tunnel edge: connector health, tunnel connection count, public HTTP reachability, and the apex left on separate hosting. |
+| `monitoring/watchdog_obs.py` | 5 signals for the observability host itself: container set, scrape target count, ingestion rate, HTTPS dashboard reachability, disk. |
 
-### Steps:
+## Tests that prove the monitoring fails correctly
 
-1. **Log in to the VCSA via SSH**:
-   ```bash
-   ssh root@<vcenter-server-ip>
-   ```
+A check that has never failed is a belief, not a control. Each of these
+breaks the thing being watched and asserts the signal goes red for the
+*right* reason.
 
-2. **Launch the Certificate Manager**:
-   ```bash
-   /usr/lib/vmware-vmca/bin/certificate-manager
-   ```
+| File | Cases |
+|---|---|
+| `tests/test_watchdog_new.py` | 11 red-run cases across the k8s and edge modules |
+| `tests/test_watchdog_obs.py` | 14 red-run cases for the observability module |
+| `tests/test_ssh_graded.py` | 9 cases separating "host is saturated" from "host is down" |
 
-3. **Choose Option 1: Replace Machine SSL certificate with Custom Certificate**:
-   - The utility will display a menu. Select:
-     ```
-     1. Replace Machine SSL certificate with Custom Certificate
-     ```
-4. **Choose Option 2: Import custom certificate(s) and key(s) to replace existing Machine SSL certificate**:
-   - The utility will display a menu. Select:
-     ```
-     2. Import custom certificate(s) and key(s) to replace existing Machine SSL certificate
-     ```
-5. **Enter the required details**:
-   - Follow the prompts to provide the paths to your custom certificate files:
-     - **Enter the path of the Machine SSL certificate**:
-       ```
-       /path/to/your/ssl_certificate.crt
-       ```
-     - **Enter the path of the private key**:
-       ```
-       /path/to/your/private_key.key
-       ```
-     - **Enter the path of the CA certificate(s)**
-       ```
-       /path/to/your/ca_chain.crt
-       ```
+`test_ssh_graded.py` came from a real false positive. A build drove a 4-core
+box to load 10.37; sshd could not complete a handshake inside the check's 25s
+timeout, so a healthy host reported as unreachable. The fix retries once with
+a 60s budget: answering slowly is a *latency* signal, not an outage.
 
-6. **Confirm Replacement**:
-   - The tool will validate the certificates and keys. If valid, it will proceed to replace the Machine SSL certificate.
+## Backups
 
-7. **Wait for the process to complete**:
-   - Certificate Manager will stop and restart vCenter services to apply the changes. This might take several minutes.
+| File | What it proves |
+|---|---|
+| `backup/k8s_backup_envs.sh` | etcd snapshot plus the rebuild material for a cluster, into restic |
+| `backup/k8s_restore_verify.sh` | restores into a scratch directory and asserts file sizes |
 
-8. **Verify the Certificate Replacement**:
-   - Log in to the vSphere Client (Web UI).
-   - Navigate to **Administration > Certificates > Machine SSL Certificate** and verify the new certificate details.
+These carry a specific lesson. `node-token` in an RKE2 server directory is a
+**symlink**. Archiving it with plain `tar cf` stores the link, not the target,
+so every restore produced a 0-byte token while the backup job reported
+success. The fix is `tar -ch` plus a hard size assertion. The verifier
+previously printed `RESTORE VERIFIED` on the same run it reported
+`0 bytes TOO-SMALL` — a checker that does not fail on its own failure is
+worse than no checker.
 
----
+## Metrics pipeline
 
-### Example of Custom Certificate Paths:
-```bash
-Certificate file: /etc/vmware/ssl/custom_machine_ssl.crt
-```
-```
----BEGIN CERTIFICATE---
-MACHINE CERTIFICATE
----END CERTIICATE---
-...
----BEGIN CERTIFICATE---
-INTERMEDIATE(S) CERTIFICATE
----END CERTIICATE---
-...
----BEGIN CERTIFICATE---
-ROOT CERTIFICATE
----END CERTIICATE---
-```
-```bash
-Private key file: /etc/vmware/ssl/custom_machine_ssl.key
-CA certificate chain: /etc/vmware/ssl/custom_ca_chain.crt
-```
-```
----BEGIN CERTIFICATE---
-INTERMEDIATE(S) CERTIFICATE
----END CERTIICATE---
----BEGIN CERTIFICATE---
-ROOT CERTIFICATE
----END CERTIICATE---
-```
+`observability/prove_queue.sh` stops the metrics database for 100 seconds and
+measures whether the agent's on-disk queue actually protects samples. Result:
+queue grew 57 B to 7.7 MB, flushed on recovery, and every node reported the
+same sample count across the outage window — zero loss.
 
----
+## Conventions
+
+- Internal addresses are replaced with `${PLACEHOLDER}` names or documented
+  lab-subnet addresses. No credentials appear in any file; the originals read
+  secrets from `0600` files on the host.
+- Scripts are intended to be read as much as run. They carry comments
+  explaining the failure that motivated them.
