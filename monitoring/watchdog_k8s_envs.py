@@ -70,10 +70,35 @@ def _cluster_checks(SSH, env, c):
     P = f"k8s:{env}"
 
     # ---- API through the VIP -------------------------------------------
-    rc, out = _ssh(SSH, cp1, f"{KCTL} get --raw /readyz", 40)
+    # --server forces the request through the VIP with the cluster CA from
+    # rke2.yaml still verifying the cert. Without --server this check used
+    # 127.0.0.1 and said "via VIP" while never touching it: on 2026-10-08 the
+    # prd VIP served a cert without 10.110.0.40 in its SANs for 9 days and this
+    # signal stayed green the whole time.
+    rc, out = _ssh(SSH, cp1, f"{KCTL} --server https://{vip}:6443 get --raw /readyz", 40)
     yield (f"{P}:api", rc == 0 and "ok" in out.lower(),
            f"{env} API (via VIP)",
            f"API via {vip} ok" if rc == 0 else f"unreachable: {out[:110]}", fix)
+
+    # ---- every CP's served cert must be valid for the VIP ---------------
+    # Latent-risk signal: the holder can be fine while a standby CP would
+    # serve a bad cert the moment failover hands it the VIP. RKE2 only adds
+    # tls-san entries from the node's OWN config.yaml, so a CP joined without
+    # the block is silently invalid for the VIP until it becomes the holder.
+    missing = []
+    for ip in c["cps"]:
+        rc, out = _ssh(SSH, ip,
+                       "echo | openssl s_client -connect 127.0.0.1:6443 2>/dev/null"
+                       " | openssl x509 -noout -ext subjectAltName", 20)
+        if rc != 0 or f"IP Address:{vip}" not in out:
+            missing.append(ip)
+    yield (f"{P}:vip-cert", not missing, f"{env} apiserver certs valid for VIP",
+           f"{len(c['cps'])}/{len(c['cps'])} control planes carry {vip} in SAN"
+           if not missing else
+           f"cert NOT valid for {vip} on: {','.join(missing)}"
+           " -- failover to that node breaks every kubeconfig",
+           "add the tls-san block to /etc/rancher/rke2/config.yaml on that node "
+           "and restart rke2-server (bash scripts/prd_san_fix.sh)")
 
     # ---- nodes ----------------------------------------------------------
     rc, out = _ssh(SSH, cp1, f"{KCTL} get nodes --no-headers", 40)
@@ -166,10 +191,10 @@ def _cluster_checks(SSH, env, c):
            f"ssh bet@{cp1} '{KCTL} get events -A --sort-by=.lastTimestamp | tail -20'")
 
     # ---- backup freshness (restic lives on assistant) -------------------
-    sftp = ("ssh -i /home/bet/.ssh/elvis -o BatchMode=yes "
+    sftp = ("ssh -i ~/.ssh/admin -o BatchMode=yes "
             "-o StrictHostKeyChecking=no bet@${WATCHDOG_HOST} -s sftp")
-    cmd = ("RESTIC_PASSWORD_FILE=/home/bet/.hermes/.restic_pw "
-           "RESTIC_REPOSITORY=sftp:bet@${WATCHDOG_HOST}:/home/bet/restic-repo "
+    cmd = ("RESTIC_PASSWORD_FILE=~/.restic_pw "
+           "RESTIC_REPOSITORY=sftp:bet@${WATCHDOG_HOST}:~/restic-repo "
            "RESTIC_PROGRESS_FPS=0 "
            f"restic -o 'sftp.command={sftp}' snapshots --tag k8s-{env} "
            "--json --latest 1 2>/dev/null")
@@ -191,7 +216,7 @@ def _cluster_checks(SSH, env, c):
     else:
         detail = f"restic failed: {out[:100]}"
     yield (f"{P}:backup", ok, f"{env} etcd backup freshness", detail,
-           "bash /home/bet/.hermes/cache/blocked-scripts/k8s_backup_envs.sh")
+           "bash scripts/k8s_backup_envs.sh")
 
 
 def checks(SSH):
