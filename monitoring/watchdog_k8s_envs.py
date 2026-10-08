@@ -218,6 +218,63 @@ def _cluster_checks(SSH, env, c):
     yield (f"{P}:backup", ok, f"{env} etcd backup freshness", detail,
            "bash scripts/k8s_backup_envs.sh")
 
+    # ---- GitOps: is Flux reconciled, and is it reconciling the CURRENT commit? ----
+    # Two different failures. Ready=False is "the apply or health check failed".
+    # Ready=True on a stale revision is "git moved and the cluster did not", which
+    # is the silent one: a dead deploy key or a suspended source looks healthy forever.
+    rc, out = _ssh(SSH, cp1,
+                   f"{KCTL} -n flux-system get kustomization -o json", 40)
+    if rc != 0 or not out.strip().startswith("{"):
+        yield (f"{P}:gitops", False, f"{env} Flux Kustomizations",
+               f"cannot read flux-system: {out[:100]}",
+               f"ssh bet@{cp1} '{KCTL} -n flux-system get kustomization'")
+    else:
+        try:
+            items = json.loads(out).get("items", [])
+            not_ready, stale, revs = [], [], set()
+            for it in items:
+                name = it["metadata"]["name"]
+                conds = {c["type"]: c for c in it.get("status", {}).get("conditions", [])}
+                ready = conds.get("Ready", {}).get("status") == "True"
+                if it.get("spec", {}).get("suspend"):
+                    not_ready.append(f"{name}(suspended)")
+                elif not ready:
+                    not_ready.append(f"{name}: {conds.get('Ready', {}).get('message', '')[:60]}")
+                rev = it.get("status", {}).get("lastAppliedRevision", "")
+                if rev:
+                    revs.add(rev.split(":")[-1][:8])
+            if len(revs) > 1:
+                stale = sorted(revs)
+            ok = bool(items) and not not_ready and not stale
+            detail = (f"{len(items)} Kustomizations Ready at {next(iter(revs)) if revs else '?'}"
+                      if ok else
+                      (f"not ready: {'; '.join(not_ready)}" if not_ready else "")
+                      + (f" revisions diverge: {stale}" if stale else "")
+                      + ("" if items else "no Kustomizations found"))
+            yield (f"{P}:gitops", ok, f"{env} Flux Kustomizations", detail,
+                   f"ssh bet@{cp1} '{KCTL} -n flux-system get kustomization'")
+        except Exception as e:  # noqa: BLE001
+            yield (f"{P}:gitops", False, f"{env} Flux Kustomizations",
+                   f"parse failed: {str(e)[:80]}",
+                   f"ssh bet@{cp1} '{KCTL} -n flux-system get kustomization'")
+
+    # ---- Kyverno admission is live and the signing policy is Ready --------
+    # A policy that exists but is not Ready, or an admission controller with 0
+    # ready replicas with failurePolicy Fail, both mean "nothing can be admitted"
+    # or "anything can be admitted" depending on the webhook config. Either is red.
+    rc, out = _ssh(SSH, cp1,
+                   f"{KCTL} -n kyverno get deploy kyverno-admission-controller "
+                   "-o jsonpath='{.status.readyReplicas}'; echo; "
+                   f"{KCTL} get clusterpolicy verify-ghcr-betv3-signed "
+                   "-o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}' 2>/dev/null", 40)
+    lines = [ln.strip().strip("'") for ln in out.splitlines()] if rc == 0 else []
+    adm = lines[0] if lines else ""
+    pol = lines[1] if len(lines) > 1 else ""
+    ok = rc == 0 and adm.isdigit() and int(adm) >= 1 and pol == "True"
+    yield (f"{P}:admission", ok, f"{env} Kyverno image-signing gate",
+           f"admission {adm or '0'} ready, policy Ready={pol or 'missing'}",
+           f"ssh bet@{cp1} '{KCTL} -n kyverno get deploy; {KCTL} get clusterpolicy'")
+
 
 def checks(SSH):
     for env, c in CLUSTERS.items():
