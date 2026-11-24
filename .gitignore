@@ -1,1 +1,2 @@
-hosts.ini
+__pycache__/
+*.pyc
